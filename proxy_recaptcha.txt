@@ -1,0 +1,114 @@
+package com.video.recaptcha;
+
+import org.apache.http.HttpHost;
+import org.apache.http.auth.AuthScope;
+import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.client.CredentialsProvider;
+import org.apache.http.impl.client.BasicCredentialsProvider;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.*;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@CrossOrigin(origins = "*")
+@RestController
+@RequestMapping("/api/recaptcha")
+public class RecaptchaController {
+
+    @Value("${recaptcha.siteKey}")
+    private String recaptchaSiteKey;
+
+    @Value("${recaptcha.apiKey}")
+    private String recaptchaApiKey;
+
+    @Value("${recaptcha.projectId}")
+    private String projectId;
+
+    private final RestTemplate restTemplate;
+
+    public RecaptchaController() {
+        // Lê as variáveis de ambiente
+        String proxyHost = System.getenv("HTTP_PROXY_HOST");
+        String proxyPortStr = System.getenv("HTTP_PROXY_PORT");
+        String proxyUser = System.getenv("HTTP_PROXY_USER");
+        String proxyPassword = System.getenv("HTTP_PROXY_PASSWORD");
+
+        // Cria o proxy se as variáveis estiverem setadas
+        if (proxyHost != null && proxyPortStr != null) {
+            int proxyPort = Integer.parseInt(proxyPortStr);
+
+            CredentialsProvider credsProvider = new BasicCredentialsProvider();
+            if (proxyUser != null && proxyPassword != null) {
+                credsProvider.setCredentials(
+                        new AuthScope(proxyHost, proxyPort),
+                        new UsernamePasswordCredentials(proxyUser, proxyPassword)
+                );
+            }
+
+            CloseableHttpClient httpClient = HttpClients.custom()
+                    .setDefaultCredentialsProvider(credsProvider)
+                    .setProxy(new HttpHost(proxyHost, proxyPort))
+                    .build();
+
+            HttpComponentsClientHttpRequestFactory factory =
+                    new HttpComponentsClientHttpRequestFactory(httpClient);
+
+            this.restTemplate = new RestTemplate(factory);
+        } else {
+            // Sem proxy
+            this.restTemplate = new RestTemplate();
+        }
+    }
+
+    @PostMapping("/validate")
+    public ResponseEntity<Map<String, Object>> validateRecaptcha(@RequestParam("token") String token) {
+        String url = "https://recaptchaenterprise.googleapis.com/v1/projects/"
+                + projectId + "/assessments?key=" + recaptchaApiKey;
+
+        // Monta o corpo da requisição
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("event", Map.of(
+                "token", token,
+                "siteKey", recaptchaSiteKey,
+                "expectedAction", "transaction" // Pode alterar se necessário
+        ));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
+
+        try {
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    url,
+                    HttpMethod.POST,
+                    requestEntity,
+                    Map.class
+            );
+
+            if (response.getBody() != null && response.getBody().containsKey("riskAnalysis")) {
+                Map<String, Object> riskAnalysis = (Map<String, Object>) response.getBody().get("riskAnalysis");
+                double score = (double) riskAnalysis.get("score");
+                boolean isHuman = score >= 0.7;
+
+                Map<String, Object> result = new HashMap<>();
+                result.put("score", score);
+                result.put("isHuman", isHuman);
+                result.put("reasons", riskAnalysis.get("reasons"));
+
+                return ResponseEntity.ok(result);
+            }
+
+            return ResponseEntity.badRequest().body(Map.of("error", "Resposta inválida do reCAPTCHA"));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Erro Interno: " + e.getMessage()));
+        }
+    }
+}
